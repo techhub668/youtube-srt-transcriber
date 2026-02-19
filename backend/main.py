@@ -12,6 +12,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 
 SRT_DIR = Path(tempfile.gettempdir()) / "srt_output"
 SRT_DIR.mkdir(exist_ok=True)
@@ -21,6 +23,53 @@ asr_model = None
 YOUTUBE_URL_PATTERN = re.compile(
     r"^https?://(www\.)?(youtube\.com/watch\?|youtu\.be/|youtube\.com/shorts/)"
 )
+
+# Trusted origin patterns (any *.vercel.app + explicitly configured origins)
+_EXTRA_ORIGINS = [
+    o.strip()
+    for o in os.getenv("ALLOWED_ORIGINS", "").split(",")
+    if o.strip() and o.strip() != "*"
+]
+_VERCEL_PATTERN = re.compile(r"^https://[a-z0-9\-]+\.vercel\.app$")
+
+
+def _origin_allowed(origin: str) -> bool:
+    if not origin:
+        return False
+    if _VERCEL_PATTERN.match(origin):
+        return True
+    return origin in _EXTRA_ORIGINS
+
+
+class DynamicCORSMiddleware(BaseHTTPMiddleware):
+    """Allow any *.vercel.app origin + explicit ALLOWED_ORIGINS."""
+
+    async def dispatch(self, request: Request, call_next):
+        origin = request.headers.get("origin", "")
+
+        if request.method == "OPTIONS":
+            # Preflight
+            if _origin_allowed(origin):
+                from starlette.responses import Response
+
+                return Response(
+                    status_code=200,
+                    headers={
+                        "Access-Control-Allow-Origin": origin,
+                        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                        "Access-Control-Allow-Credentials": "true",
+                        "Access-Control-Max-Age": "600",
+                    },
+                )
+
+        response = await call_next(request)
+
+        if _origin_allowed(origin):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+
+        return response
 
 
 @asynccontextmanager
@@ -40,14 +89,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="YouTube SRT Transcriber API", lifespan=lifespan)
 
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(DynamicCORSMiddleware)
 
 
 class TranscribeRequest(BaseModel):
