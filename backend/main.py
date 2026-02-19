@@ -4,13 +4,12 @@ import uuid
 import asyncio
 import tempfile
 import subprocess
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import yt_dlp
 import opencc
+from groq import Groq
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -19,9 +18,10 @@ from starlette.requests import Request
 SRT_DIR = Path(tempfile.gettempdir()) / "srt_output"
 SRT_DIR.mkdir(exist_ok=True)
 
-asr_model = None
+# Groq Whisper client
+groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-# Simplified → Traditional converter (for Cantonese output)
+# Simplified -> Traditional converter (for Cantonese output)
 _s2t = opencc.OpenCC("s2t")
 
 YOUTUBE_URL_PATTERN = re.compile(
@@ -76,22 +76,7 @@ class DynamicCORSMiddleware(BaseHTTPMiddleware):
         return response
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global asr_model
-    from funasr import AutoModel
-
-    asr_model = AutoModel(
-        model="iic/SenseVoiceSmall",
-        vad_model="fsmn-vad",
-        vad_kwargs={"max_single_segment_time": 30000},
-        trust_remote_code=True,
-        device="cpu",
-    )
-    yield
-
-
-app = FastAPI(title="YouTube SRT Transcriber API", lifespan=lifespan)
+app = FastAPI(title="YouTube SRT Transcriber API")
 
 app.add_middleware(DynamicCORSMiddleware)
 
@@ -128,24 +113,6 @@ def _download_audio(youtube_url: str) -> str:
     return wav_path
 
 
-def _get_audio_duration(wav_path: str) -> float:
-    """Return audio duration in seconds via ffprobe."""
-    try:
-        proc = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                wav_path,
-            ],
-            capture_output=True,
-            text=True,
-        )
-        return float(proc.stdout.strip())
-    except Exception:
-        return 0.0
-
-
 def _convert_to_wav(input_bytes: bytes) -> str:
     """Convert arbitrary audio bytes (webm/ogg) to 16 kHz mono wav via ffmpeg."""
     in_path = SRT_DIR / f"live_in_{uuid.uuid4()}.webm"
@@ -173,45 +140,28 @@ def _format_ts(seconds: float) -> str:
 
 
 def _convert_chinese(text: str, language: str) -> str:
-    """Cantonese → Traditional Chinese, Mandarin → Simplified (no-op)."""
+    """Cantonese -> Traditional Chinese, Mandarin -> Simplified (no-op)."""
     if language == "yue":
         return _s2t.convert(text)
     return text
 
 
-def _build_srt(result: list, audio_duration: float = 0.0, language: str = "yue") -> str:
-    """Build SRT string from funasr result list."""
+def _build_srt(segments, language: str = "yue") -> str:
+    """Build SRT string from Groq Whisper segments.
+
+    Each segment has .start (float seconds), .end (float seconds), .text (str).
+    """
     lines: list[str] = []
     idx = 1
 
-    # Collect segments with cleaned text
-    segments = []
-    for item in result:
-        raw_text: str = item.get("text", "")
-        text = re.sub(r"<\|[^|]*\|>", "", raw_text).strip()
+    for seg in segments:
+        text = seg.text.strip()
         if not text:
             continue
         text = _convert_chinese(text, language)
-        segments.append({"text": text, "timestamp": item.get("timestamp")})
-
-    if not segments:
-        return ""
-
-    # Estimate per-segment duration when timestamps are missing
-    seg_duration = (audio_duration / len(segments)) if audio_duration > 0 else 5.0
-
-    for i, seg in enumerate(segments):
-        ts = seg["timestamp"]
-        if ts and len(ts) >= 2:
-            start_s = ts[0][0] / 1000
-            end_s = ts[-1][1] / 1000
-        else:
-            start_s = i * seg_duration
-            end_s = (i + 1) * seg_duration
-
         lines.append(f"{idx}")
-        lines.append(f"{_format_ts(start_s)} --> {_format_ts(end_s)}")
-        lines.append(seg["text"])
+        lines.append(f"{_format_ts(seg.start)} --> {_format_ts(seg.end)}")
+        lines.append(text)
         lines.append("")
         idx += 1
 
@@ -232,20 +182,19 @@ async def transcribe_youtube(req: TranscribeRequest):
     try:
         audio_path = await asyncio.to_thread(_download_audio, req.youtube_url)
 
-        duration = await asyncio.to_thread(_get_audio_duration, audio_path)
+        def _transcribe():
+            with open(audio_path, "rb") as f:
+                return groq_client.audio.transcriptions.create(
+                    file=("audio.wav", f),
+                    model="whisper-large-v3-turbo",
+                    language=req.language,
+                    response_format="verbose_json",
+                    timestamp_granularities=["segment"],
+                )
 
-        result = await asyncio.to_thread(
-            asr_model.generate,
-            input=audio_path,
-            cache={},
-            language=req.language,
-            use_itn=True,
-            batch_size_s=60,
-            merge_vad=True,
-            merge_length_s=15,
-        )
+        transcription = await asyncio.to_thread(_transcribe)
 
-        srt_content = _build_srt(result, audio_duration=duration, language=req.language)
+        srt_content = _build_srt(transcription.segments, language=req.language)
 
         filename = f"{uuid.uuid4()}.srt"
         (SRT_DIR / filename).write_text(srt_content, encoding="utf-8")
@@ -293,22 +242,22 @@ async def live_stt(websocket: WebSocket):
 
             wav_path = await asyncio.to_thread(_convert_to_wav, audio_bytes)
 
-            result = await asyncio.to_thread(
-                asr_model.generate,
-                input=wav_path,
-                cache={},
-                language=lang,
-                use_itn=True,
-            )
+            def _transcribe_chunk(path=wav_path, language=lang):
+                with open(path, "rb") as f:
+                    return groq_client.audio.transcriptions.create(
+                        file=("chunk.wav", f),
+                        model="whisper-large-v3-turbo",
+                        language=language,
+                        response_format="json",
+                    )
+
+            transcription = await asyncio.to_thread(_transcribe_chunk)
 
             Path(wav_path).unlink(missing_ok=True)
 
-            text = ""
-            if result:
-                raw = result[0].get("text", "")
-                text = re.sub(r"<\|[^|]*\|>", "", raw).strip()
-                if text:
-                    text = _convert_chinese(text, lang)
+            text = transcription.text.strip() if transcription.text else ""
+            if text:
+                text = _convert_chinese(text, lang)
 
             await websocket.send_json({"text": text})
 
@@ -323,4 +272,4 @@ async def live_stt(websocket: WebSocket):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model": "SenseVoiceSmall"}
+    return {"status": "ok", "model": "whisper-large-v3-turbo"}
