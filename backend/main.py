@@ -196,12 +196,14 @@ def _build_srt(segments, language: str = "yue") -> str:
     idx = 1
 
     for seg in segments:
-        text = seg.text.strip()
+        text = (seg.get("text", "") if isinstance(seg, dict) else seg.text).strip()
         if not text:
             continue
         text = _convert_chinese(text, language)
+        start = seg["start"] if isinstance(seg, dict) else seg.start
+        end = seg["end"] if isinstance(seg, dict) else seg.end
         lines.append(f"{idx}")
-        lines.append(f"{_format_ts(seg.start)} --> {_format_ts(seg.end)}")
+        lines.append(f"{_format_ts(start)} --> {_format_ts(end)}")
         lines.append(text)
         lines.append("")
         idx += 1
@@ -238,9 +240,14 @@ async def transcribe_youtube(req: TranscribeRequest):
 
             transcription = await asyncio.to_thread(_transcribe)
 
-            for seg in transcription.segments:
-                seg.start += offset
-                seg.end += offset
+            segs = transcription.segments if hasattr(transcription, "segments") else transcription.get("segments", [])
+            for seg in segs:
+                if isinstance(seg, dict):
+                    seg["start"] = seg.get("start", 0) + offset
+                    seg["end"] = seg.get("end", 0) + offset
+                else:
+                    seg.start += offset
+                    seg.end += offset
                 all_segments.append(seg)
 
             # Clean up chunk if it's not the original file
@@ -308,7 +315,8 @@ async def live_stt(websocket: WebSocket):
 
             Path(wav_path).unlink(missing_ok=True)
 
-            text = transcription.text.strip() if transcription.text else ""
+            raw_text = transcription.text if hasattr(transcription, "text") else transcription.get("text", "")
+            text = raw_text.strip() if raw_text else ""
             if text:
                 text = _convert_chinese(text, lang)
 
