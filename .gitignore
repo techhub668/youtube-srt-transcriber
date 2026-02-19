@@ -8,10 +8,10 @@ venv/
 # Build output
 frontend/dist/
 
-# Environment
+# Environment (keep .env.production for Vercel builds)
 .env
 .env.local
-.env.production
+.env.*.local
 
 # IDE
 .vscode/
