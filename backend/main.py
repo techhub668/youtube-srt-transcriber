@@ -89,16 +89,20 @@ class TranscribeRequest(BaseModel):
 # --------------- helpers ---------------
 
 
+GROQ_MAX_FILE_SIZE = 24 * 1024 * 1024  # 24 MB (leave margin under 25 MB limit)
+CHUNK_DURATION_SEC = 600  # 10-minute chunks
+
+
 def _download_audio(youtube_url: str) -> str:
-    """Download audio from a YouTube URL, return path to .wav file."""
+    """Download audio from a YouTube URL, return path to .mp3 file."""
     stem = str(SRT_DIR / str(uuid.uuid4()))
     ydl_opts = {
         "format": "bestaudio/best",
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
-                "preferredcodec": "wav",
-                "preferredquality": "0",
+                "preferredcodec": "mp3",
+                "preferredquality": "64",
             }
         ],
         "outtmpl": stem,
@@ -107,10 +111,47 @@ def _download_audio(youtube_url: str) -> str:
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([youtube_url])
-    wav_path = stem + ".wav"
-    if not Path(wav_path).exists():
+    mp3_path = stem + ".mp3"
+    if not Path(mp3_path).exists():
         raise FileNotFoundError("yt-dlp failed to produce an audio file")
-    return wav_path
+    return mp3_path
+
+
+def _split_audio(audio_path: str) -> list[tuple[str, float]]:
+    """Split audio into chunks if it exceeds Groq file size limit.
+
+    Returns list of (chunk_path, offset_seconds) tuples.
+    If file is small enough, returns [(original_path, 0.0)].
+    """
+    if Path(audio_path).stat().st_size <= GROQ_MAX_FILE_SIZE:
+        return [(audio_path, 0.0)]
+
+    chunks = []
+    offset = 0.0
+    idx = 0
+    while True:
+        chunk_path = str(SRT_DIR / f"chunk_{uuid.uuid4()}_{idx}.mp3")
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", audio_path,
+                "-ss", str(offset),
+                "-t", str(CHUNK_DURATION_SEC),
+                "-acodec", "libmp3lame", "-ab", "64k",
+                "-ac", "1", chunk_path,
+            ],
+            capture_output=True,
+        )
+        if proc.returncode != 0 or not Path(chunk_path).exists():
+            break
+        if Path(chunk_path).stat().st_size < 1000:
+            # Empty/negligible chunk means we've passed the end
+            Path(chunk_path).unlink(missing_ok=True)
+            break
+        chunks.append((chunk_path, offset))
+        offset += CHUNK_DURATION_SEC
+        idx += 1
+
+    return chunks if chunks else [(audio_path, 0.0)]
 
 
 def _convert_to_wav(input_bytes: bytes) -> str:
@@ -181,20 +222,32 @@ async def transcribe_youtube(req: TranscribeRequest):
 
     try:
         audio_path = await asyncio.to_thread(_download_audio, req.youtube_url)
+        chunks = await asyncio.to_thread(_split_audio, audio_path)
 
-        def _transcribe():
-            with open(audio_path, "rb") as f:
-                return groq_client.audio.transcriptions.create(
-                    file=("audio.wav", f),
-                    model="whisper-large-v3-turbo",
-                    language=req.language,
-                    response_format="verbose_json",
-                    timestamp_granularities=["segment"],
-                )
+        all_segments = []
+        for chunk_path, offset in chunks:
+            def _transcribe(path=chunk_path):
+                with open(path, "rb") as f:
+                    return groq_client.audio.transcriptions.create(
+                        file=("audio.mp3", f),
+                        model="whisper-large-v3-turbo",
+                        language=req.language,
+                        response_format="verbose_json",
+                        timestamp_granularities=["segment"],
+                    )
 
-        transcription = await asyncio.to_thread(_transcribe)
+            transcription = await asyncio.to_thread(_transcribe)
 
-        srt_content = _build_srt(transcription.segments, language=req.language)
+            for seg in transcription.segments:
+                seg.start += offset
+                seg.end += offset
+                all_segments.append(seg)
+
+            # Clean up chunk if it's not the original file
+            if chunk_path != audio_path:
+                Path(chunk_path).unlink(missing_ok=True)
+
+        srt_content = _build_srt(all_segments, language=req.language)
 
         filename = f"{uuid.uuid4()}.srt"
         (SRT_DIR / filename).write_text(srt_content, encoding="utf-8")
