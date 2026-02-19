@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import yt_dlp
+import opencc
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -19,6 +20,9 @@ SRT_DIR = Path(tempfile.gettempdir()) / "srt_output"
 SRT_DIR.mkdir(exist_ok=True)
 
 asr_model = None
+
+# Simplified → Traditional converter (for Cantonese output)
+_s2t = opencc.OpenCC("s2t")
 
 YOUTUBE_URL_PATTERN = re.compile(
     r"^https?://(www\.)?(youtube\.com/watch\?|youtu\.be/|youtube\.com/shorts/)"
@@ -168,7 +172,14 @@ def _format_ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def _build_srt(result: list, audio_duration: float = 0.0) -> str:
+def _convert_chinese(text: str, language: str) -> str:
+    """Cantonese → Traditional Chinese, Mandarin → Simplified (no-op)."""
+    if language == "yue":
+        return _s2t.convert(text)
+    return text
+
+
+def _build_srt(result: list, audio_duration: float = 0.0, language: str = "yue") -> str:
     """Build SRT string from funasr result list."""
     lines: list[str] = []
     idx = 1
@@ -180,6 +191,7 @@ def _build_srt(result: list, audio_duration: float = 0.0) -> str:
         text = re.sub(r"<\|[^|]*\|>", "", raw_text).strip()
         if not text:
             continue
+        text = _convert_chinese(text, language)
         segments.append({"text": text, "timestamp": item.get("timestamp")})
 
     if not segments:
@@ -233,7 +245,7 @@ async def transcribe_youtube(req: TranscribeRequest):
             merge_length_s=15,
         )
 
-        srt_content = _build_srt(result, audio_duration=duration)
+        srt_content = _build_srt(result, audio_duration=duration, language=req.language)
 
         filename = f"{uuid.uuid4()}.srt"
         (SRT_DIR / filename).write_text(srt_content, encoding="utf-8")
@@ -295,6 +307,8 @@ async def live_stt(websocket: WebSocket):
             if result:
                 raw = result[0].get("text", "")
                 text = re.sub(r"<\|[^|]*\|>", "", raw).strip()
+                if text:
+                    text = _convert_chinese(text, lang)
 
             await websocket.send_json({"text": text})
 
