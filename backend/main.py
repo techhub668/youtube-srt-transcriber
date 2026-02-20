@@ -102,7 +102,7 @@ def _download_audio(youtube_url: str) -> str:
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
-                "preferredquality": "64",
+                "preferredquality": "0",
             }
         ],
         "outtmpl": stem,
@@ -136,7 +136,7 @@ def _split_audio(audio_path: str) -> list[tuple[str, float]]:
                 "ffmpeg", "-y", "-i", audio_path,
                 "-ss", str(offset),
                 "-t", str(CHUNK_DURATION_SEC),
-                "-acodec", "libmp3lame", "-ab", "64k",
+                "-acodec", "libmp3lame", "-ab", "128k",
                 "-ac", "1", chunk_path,
             ],
             capture_output=True,
@@ -232,8 +232,7 @@ async def transcribe_youtube(req: TranscribeRequest):
                 with open(path, "rb") as f:
                     return groq_client.audio.transcriptions.create(
                         file=("audio.mp3", f),
-                        model="whisper-large-v3-turbo",
-                        language=req.language,
+                        model="whisper-large-v3",
                         response_format="verbose_json",
                         timestamp_granularities=["segment"],
                     )
@@ -306,8 +305,7 @@ async def live_stt(websocket: WebSocket):
                 with open(path, "rb") as f:
                     return groq_client.audio.transcriptions.create(
                         file=("chunk.wav", f),
-                        model="whisper-large-v3-turbo",
-                        language=language,
+                        model="whisper-large-v3",
                         response_format="json",
                     )
 
@@ -333,4 +331,4 @@ async def live_stt(websocket: WebSocket):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model": "whisper-large-v3-turbo"}
+    return {"status": "ok", "model": "whisper-large-v3"}
