@@ -8,6 +8,7 @@ from pathlib import Path
 
 import yt_dlp
 import opencc
+import httpx
 from groq import Groq
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -23,6 +24,37 @@ groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 # Simplified -> Traditional converter (for Cantonese output)
 _s2t = opencc.OpenCC("s2t")
+
+# Ollama Cloud API
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
+OLLAMA_ENDPOINT = "https://ollama.com/api/chat"
+OLLAMA_MODEL = "qwen3:4b-cloud"
+
+_SUMMARY_PROMPT = """You are an AI assistant that summarizes video transcripts. You will receive SRT subtitle text from a YouTube video.
+
+Instructions:
+- Create a concise summary (2-4 paragraphs) of the main topics and key points
+- Remove timing codes and numbering artifacts from SRT format
+- Write in a clear, readable style
+- CRITICAL: Output your summary in the SAME LANGUAGE as the input transcript. If the transcript is in Chinese, write in Chinese. If English, write in English.
+- Do not add commentary, opinions, or information not present in the transcript
+- Do not use markdown formatting
+
+Now summarize the following transcript:"""
+
+_POLISH_PROMPT = """You are a professional text editor specializing in cleaning up speech-to-text transcripts.
+
+Your task:
+- Remove filler words and sounds: "um", "uh", "like", "you know", "so", "actually", "basically", "right", "呢", "啊", "嗯", "那個", "就是說", "然後", "其實", "即係"
+- Fix grammatical errors and awkward phrasing
+- Improve sentence structure and flow
+- Make the text read like polished written content
+- CRITICAL: Output in the SAME LANGUAGE as the input. Do not translate.
+- Do NOT change the meaning or add new information
+- Do NOT remove important content - only clean up delivery artifacts
+- Do not use markdown formatting
+
+Clean up the following transcript:"""
 
 YOUTUBE_URL_PATTERN = re.compile(
     r"^https?://(www\.)?(youtube\.com/watch\?|youtu\.be/|youtube\.com/shorts/)"
@@ -84,6 +116,11 @@ app.add_middleware(DynamicCORSMiddleware)
 class TranscribeRequest(BaseModel):
     youtube_url: str
     language: str = "yue"
+
+
+class SummarizeRequest(BaseModel):
+    text: str
+    mode: str = "summary"  # "summary" or "polish"
 
 
 # --------------- helpers ---------------
@@ -327,6 +364,63 @@ async def live_stt(websocket: WebSocket):
             await websocket.send_json({"error": str(exc)})
         except Exception:
             pass
+
+
+async def _call_ollama(text: str, mode: str) -> str:
+    """Call Ollama Cloud API for summarization / polishing."""
+    if not OLLAMA_API_KEY:
+        raise RuntimeError("OLLAMA_API_KEY not configured")
+
+    system_prompt = _SUMMARY_PROMPT if mode == "summary" else _POLISH_PROMPT
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": text},
+        ],
+        "stream": False,
+    }
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            OLLAMA_ENDPOINT,
+            json=payload,
+            headers={"Authorization": f"Bearer {OLLAMA_API_KEY}"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["message"]["content"]
+
+
+@app.post("/api/summarize")
+async def summarize_text(req: SummarizeRequest):
+    if req.mode not in ("summary", "polish"):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Mode must be 'summary' or 'polish'."},
+        )
+    if not req.text or not req.text.strip():
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Text content is required."},
+        )
+    if len(req.text) > 50000:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Text too long (max 50 000 characters)."},
+        )
+
+    try:
+        result = await _call_ollama(req.text.strip(), req.mode)
+        return {"summary": result}
+    except httpx.HTTPStatusError as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Ollama API error: {exc.response.status_code}"},
+        )
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc)})
 
 
 @app.get("/health")

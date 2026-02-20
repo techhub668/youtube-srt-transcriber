@@ -15,6 +15,10 @@ export default function LiveSTT({ apiUrl }) {
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
 
+  const [polished, setPolished] = useState("");
+  const [polishing, setPolishing] = useState(false);
+  const [polishError, setPolishError] = useState("");
+
   const wsRef = useRef(null);
   const streamRef = useRef(null);
   const recorderRef = useRef(null);
@@ -144,10 +148,45 @@ export default function LiveSTT({ apiUrl }) {
   function handleClear() {
     setTranscript([]);
     setError("");
+    setPolished("");
+    setPolishError("");
   }
 
   function handleCopy() {
     navigator.clipboard.writeText(transcript.join("\n"));
+  }
+
+  async function handlePolish() {
+    const text = transcript.join("\n");
+    if (!text.trim()) return;
+
+    setPolishing(true);
+    setPolishError("");
+    setPolished("");
+
+    try {
+      const res = await fetch(`${apiUrl}/api/summarize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, mode: "polish" }),
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `Server error ${res.status}`);
+      }
+
+      const data = await res.json();
+      setPolished(data.summary);
+    } catch (err) {
+      setPolishError(err.message);
+    } finally {
+      setPolishing(false);
+    }
+  }
+
+  function handleCopyPolished() {
+    navigator.clipboard.writeText(polished);
   }
 
   return (
@@ -229,6 +268,13 @@ export default function LiveSTT({ apiUrl }) {
             >
               Clear
             </button>
+            <button
+              onClick={handlePolish}
+              disabled={transcript.length === 0 || polishing}
+              className="text-xs px-2 py-1 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {polishing ? "Polishing..." : "Polish"}
+            </button>
           </div>
         </div>
         <div
@@ -248,6 +294,41 @@ export default function LiveSTT({ apiUrl }) {
           )}
         </div>
       </div>
+
+      {/* Polish Error */}
+      {polishError && (
+        <div className="bg-red-50 text-red-700 text-sm rounded-lg px-3 py-2 border border-red-200">
+          {polishError}
+        </div>
+      )}
+
+      {/* Polishing indicator */}
+      {polishing && (
+        <div className="flex items-center gap-2 text-sm text-gray-600">
+          <div className="w-4 h-4 border-2 border-purple-400 border-t-transparent rounded-full animate-spin" />
+          <span>Polishing transcript...</span>
+        </div>
+      )}
+
+      {/* Polished Transcript */}
+      {polished && (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-purple-600 uppercase tracking-wide">
+              Polished Transcript
+            </span>
+            <button
+              onClick={handleCopyPolished}
+              className="text-xs px-2 py-1 text-gray-500 hover:text-gray-700 border border-gray-200 rounded transition-colors"
+            >
+              Copy
+            </button>
+          </div>
+          <div className="bg-purple-50 border border-purple-200 rounded-lg p-3 text-sm leading-relaxed max-h-60 overflow-y-auto whitespace-pre-wrap">
+            {polished}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

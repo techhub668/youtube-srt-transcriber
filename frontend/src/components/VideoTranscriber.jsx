@@ -17,6 +17,10 @@ export default function VideoTranscriber({ apiUrl }) {
   const [filename, setFilename] = useState("");
   const [error, setError] = useState("");
 
+  const [summary, setSummary] = useState("");
+  const [summarizing, setSummarizing] = useState(false);
+  const [summaryError, setSummaryError] = useState("");
+
   async function handleTranscribe(e) {
     e.preventDefault();
     if (!url.trim()) return;
@@ -25,6 +29,8 @@ export default function VideoTranscriber({ apiUrl }) {
     setError("");
     setSrtContent("");
     setFilename("");
+    setSummary("");
+    setSummaryError("");
     setProgress("Downloading audio and transcribing...");
 
     try {
@@ -51,6 +57,34 @@ export default function VideoTranscriber({ apiUrl }) {
     }
   }
 
+  async function handleSummarize() {
+    if (!srtContent) return;
+
+    setSummarizing(true);
+    setSummaryError("");
+    setSummary("");
+
+    try {
+      const res = await fetch(`${apiUrl}/api/summarize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: srtContent, mode: "summary" }),
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `Server error ${res.status}`);
+      }
+
+      const data = await res.json();
+      setSummary(data.summary);
+    } catch (err) {
+      setSummaryError(err.message);
+    } finally {
+      setSummarizing(false);
+    }
+  }
+
   function handleDownload() {
     if (filename) {
       window.open(`${apiUrl}/api/download/${filename}`, "_blank");
@@ -59,6 +93,10 @@ export default function VideoTranscriber({ apiUrl }) {
 
   function handleCopyToClipboard() {
     navigator.clipboard.writeText(srtContent);
+  }
+
+  function handleCopySummary() {
+    navigator.clipboard.writeText(summary);
   }
 
   return (
@@ -140,11 +178,53 @@ export default function VideoTranscriber({ apiUrl }) {
               >
                 Download .srt
               </button>
+              <button
+                onClick={handleSummarize}
+                disabled={summarizing}
+                className="text-xs px-2 py-1 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {summarizing ? "Summarizing..." : "Summarize"}
+              </button>
             </div>
           </div>
           <pre className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs leading-relaxed max-h-80 overflow-y-auto whitespace-pre-wrap">
             {srtContent}
           </pre>
+        </div>
+      )}
+
+      {/* Summary Error */}
+      {summaryError && (
+        <div className="bg-red-50 text-red-700 text-sm rounded-lg px-3 py-2 border border-red-200">
+          {summaryError}
+        </div>
+      )}
+
+      {/* Summarizing indicator */}
+      {summarizing && (
+        <div className="flex items-center gap-2 text-sm text-gray-600">
+          <div className="w-4 h-4 border-2 border-purple-400 border-t-transparent rounded-full animate-spin" />
+          <span>Generating summary...</span>
+        </div>
+      )}
+
+      {/* Summary */}
+      {summary && (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-purple-600 uppercase tracking-wide">
+              Summary
+            </span>
+            <button
+              onClick={handleCopySummary}
+              className="text-xs px-2 py-1 text-gray-500 hover:text-gray-700 border border-gray-200 rounded transition-colors"
+            >
+              Copy
+            </button>
+          </div>
+          <div className="bg-purple-50 border border-purple-200 rounded-lg p-3 text-sm leading-relaxed max-h-60 overflow-y-auto whitespace-pre-wrap">
+            {summary}
+          </div>
         </div>
       )}
     </div>
