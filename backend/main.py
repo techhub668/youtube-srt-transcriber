@@ -28,7 +28,7 @@ _s2t = opencc.OpenCC("s2t")
 # Ollama Cloud API
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 OLLAMA_ENDPOINT = "https://ollama.com/api/chat"
-OLLAMA_MODEL = "qwen3:4b-cloud"
+OLLAMA_MODEL = "deepseek-v3.2"
 
 _SUMMARY_PROMPT = """You are an AI assistant that summarizes video transcripts. You will receive SRT subtitle text from a YouTube video.
 
@@ -382,7 +382,7 @@ async def _call_ollama(text: str, mode: str) -> str:
         "stream": False,
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
             OLLAMA_ENDPOINT,
             json=payload,
