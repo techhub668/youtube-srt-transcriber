@@ -16,7 +16,7 @@ export default function App() {
             <span className="text-red-600">YouTube</span> SRT Transcriber
           </h1>
           <span className="text-xs text-gray-400 hidden sm:inline">
-            Powered by SenseVoice &middot; Cantonese-optimised
+            Powered by Whisper &middot; Cantonese-optimised
           </span>
         </div>
       </header>
