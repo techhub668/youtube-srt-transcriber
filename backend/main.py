@@ -265,11 +265,12 @@ async def transcribe_youtube(req: TranscribeRequest):
 
         all_segments = []
         for chunk_path, offset in chunks:
-            def _transcribe(path=chunk_path):
+            def _transcribe(path=chunk_path, language=req.language):
                 with open(path, "rb") as f:
                     return groq_client.audio.transcriptions.create(
                         file=("audio.mp3", f),
                         model="whisper-large-v3",
+                        language=language,
                         response_format="verbose_json",
                         timestamp_granularities=["segment"],
                     )
@@ -343,6 +344,7 @@ async def live_stt(websocket: WebSocket):
                     return groq_client.audio.transcriptions.create(
                         file=("chunk.wav", f),
                         model="whisper-large-v3",
+                        language=language,
                         response_format="json",
                     )
 
