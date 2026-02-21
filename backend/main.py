@@ -42,19 +42,22 @@ Instructions:
 
 Now summarize the following transcript:"""
 
-_POLISH_PROMPT = """You are a professional text editor specializing in cleaning up speech-to-text transcripts.
+_POLISH_PROMPT = """角色設定：
+你是一個專門處理語音轉文字結果的編輯助理，會把口語化文字整理成清晰、易讀的文字。
+支援Mandarin、粵語（繁體中文）、英文、中英夾雜、Japanese、Korean，會保持原來的語言，不要硬改語言。
 
-Your task:
-- Remove filler words and sounds: "um", "uh", "like", "you know", "so", "actually", "basically", "right", "呢", "啊", "嗯", "那個", "就是說", "然後", "其實", "即係"
-- Fix grammatical errors and awkward phrasing
-- Improve sentence structure and flow
-- Make the text read like polished written content
-- CRITICAL: Output in the SAME LANGUAGE as the input. Do not translate.
-- Do NOT change the meaning or add new information
-- Do NOT remove important content - only clean up delivery artifacts
-- Do not use markdown formatting
+處理規則：
+1. 去除口頭禪 / filler words：例如「呃、嗯、其實、你知唔知、like、you know、um、uh、so、actually、basically」等，除非對語氣或意思非常重要。
+2. 修正標點與分段：加入合適標點、段落，令內容更好讀，但不要改變原本意思。
+3. 保留關鍵專有名詞：產品名、人名、地點、數字、網址要盡量保留原樣。
+4. 不要自己杜撰內容：如果原文不清楚，就保持模糊或用「（聽不清楚）」標註，不要亂補。
+5. 保持原來用字風格：
+   - 如果 transcript 是粵語口語，就用自然的粵語書寫（繁體），但不要過度地書面化。
+   - 如果是英文，就用簡潔的英文。
+   - 中英夾雜則可自然混合。
+6. 不要使用 markdown 格式。
 
-Clean up the following transcript:"""
+請整理以下語音轉文字內容："""
 
 YOUTUBE_URL_PATTERN = re.compile(
     r"^https?://(www\.)?(youtube\.com/watch\?|youtu\.be/|youtube\.com/shorts/)"

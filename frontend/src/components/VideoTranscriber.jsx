@@ -17,9 +17,9 @@ export default function VideoTranscriber({ apiUrl }) {
   const [filename, setFilename] = useState("");
   const [error, setError] = useState("");
 
-  const [summary, setSummary] = useState("");
-  const [summarizing, setSummarizing] = useState(false);
-  const [summaryError, setSummaryError] = useState("");
+  const [polished, setPolished] = useState("");
+  const [polishing, setPolishing] = useState(false);
+  const [polishError, setPolishError] = useState("");
 
   async function handleTranscribe(e) {
     e.preventDefault();
@@ -29,8 +29,8 @@ export default function VideoTranscriber({ apiUrl }) {
     setError("");
     setSrtContent("");
     setFilename("");
-    setSummary("");
-    setSummaryError("");
+    setPolished("");
+    setPolishError("");
     setProgress("Downloading audio and transcribing...");
 
     try {
@@ -57,18 +57,18 @@ export default function VideoTranscriber({ apiUrl }) {
     }
   }
 
-  async function handleSummarize() {
+  async function handlePolish() {
     if (!srtContent) return;
 
-    setSummarizing(true);
-    setSummaryError("");
-    setSummary("");
+    setPolishing(true);
+    setPolishError("");
+    setPolished("");
 
     try {
       const res = await fetch(`${apiUrl}/api/summarize`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: srtContent, mode: "summary" }),
+        body: JSON.stringify({ text: srtContent, mode: "polish" }),
       });
 
       if (!res.ok) {
@@ -77,11 +77,11 @@ export default function VideoTranscriber({ apiUrl }) {
       }
 
       const data = await res.json();
-      setSummary(data.summary);
+      setPolished(data.summary);
     } catch (err) {
-      setSummaryError(err.message);
+      setPolishError(err.message);
     } finally {
-      setSummarizing(false);
+      setPolishing(false);
     }
   }
 
@@ -95,8 +95,8 @@ export default function VideoTranscriber({ apiUrl }) {
     navigator.clipboard.writeText(srtContent);
   }
 
-  function handleCopySummary() {
-    navigator.clipboard.writeText(summary);
+  function handleCopyPolished() {
+    navigator.clipboard.writeText(polished);
   }
 
   return (
@@ -179,11 +179,11 @@ export default function VideoTranscriber({ apiUrl }) {
                 Download .srt
               </button>
               <button
-                onClick={handleSummarize}
-                disabled={summarizing}
+                onClick={handlePolish}
+                disabled={polishing}
                 className="text-xs px-2 py-1 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
-                {summarizing ? "Summarizing..." : "Summarize"}
+                {polishing ? "Polishing..." : "Polish"}
               </button>
             </div>
           </div>
@@ -193,37 +193,37 @@ export default function VideoTranscriber({ apiUrl }) {
         </div>
       )}
 
-      {/* Summary Error */}
-      {summaryError && (
+      {/* Polish Error */}
+      {polishError && (
         <div className="bg-red-50 text-red-700 text-sm rounded-lg px-3 py-2 border border-red-200">
-          {summaryError}
+          {polishError}
         </div>
       )}
 
-      {/* Summarizing indicator */}
-      {summarizing && (
+      {/* Polishing indicator */}
+      {polishing && (
         <div className="flex items-center gap-2 text-sm text-gray-600">
           <div className="w-4 h-4 border-2 border-purple-400 border-t-transparent rounded-full animate-spin" />
-          <span>Generating summary...</span>
+          <span>Polishing transcript...</span>
         </div>
       )}
 
-      {/* Summary */}
-      {summary && (
+      {/* Polished Text */}
+      {polished && (
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-purple-600 uppercase tracking-wide">
-              Summary
+              Polished Transcript
             </span>
             <button
-              onClick={handleCopySummary}
+              onClick={handleCopyPolished}
               className="text-xs px-2 py-1 text-gray-500 hover:text-gray-700 border border-gray-200 rounded transition-colors"
             >
               Copy
             </button>
           </div>
           <div className="bg-purple-50 border border-purple-200 rounded-lg p-3 text-sm leading-relaxed max-h-60 overflow-y-auto whitespace-pre-wrap">
-            {summary}
+            {polished}
           </div>
         </div>
       )}
