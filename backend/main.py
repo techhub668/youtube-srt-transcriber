@@ -30,10 +30,8 @@ OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 OLLAMA_ENDPOINT = "https://ollama.com/api/chat"
 OLLAMA_MODEL = "deepseek-v3.2"
 
-# ElevenLabs Scribe API
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-ELEVENLABS_API_URL = "https://api.elevenlabs.io/v1/speech-to-text"
-ELEVENLABS_MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
+# Minutes Agent: max upload size
+MINUTES_MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 
 _SUMMARY_PROMPT = """You are an AI assistant that summarizes video transcripts. You will receive SRT subtitle text from a YouTube video.
 
@@ -429,69 +427,27 @@ async def _call_ollama(text: str, mode: str) -> str:
         return data["message"]["content"]
 
 
-async def _call_elevenlabs_scribe(audio_path: str, language: str) -> dict:
-    """Call ElevenLabs Scribe API for transcription."""
-    if not ELEVENLABS_API_KEY:
-        raise RuntimeError("ELEVENLABS_API_KEY not configured")
-
-    with open(audio_path, "rb") as f:
-        files = {"file": (Path(audio_path).name, f.read())}
-
-    data = {"model_id": "scribe_v1", "language_code": language}
-
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        resp = await client.post(
-            ELEVENLABS_API_URL,
-            headers={"xi-api-key": ELEVENLABS_API_KEY},
-            files=files,
-            data=data,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-
-def _format_minutes_text(result: dict, language: str, include_timestamps: bool) -> str:
-    """Format ElevenLabs response as plain text or timestamped text."""
-    text = result.get("text", "")
-    text = _convert_chinese(text, language)
+def _format_minutes_text(segments: list, language: str, include_timestamps: bool) -> str:
+    """Format Groq Whisper segments as plain text or timestamped text."""
+    if not segments:
+        return ""
 
     if not include_timestamps:
-        return text
+        parts = []
+        for seg in segments:
+            text = seg.text if hasattr(seg, "text") else seg.get("text", "")
+            parts.append(text.strip())
+        full = " ".join(parts)
+        return _convert_chinese(full, language)
 
-    # Format with timestamps from words if available
-    words = result.get("words", [])
-    if not words:
-        return text
-
-    # Group words into lines (roughly by sentence or time gaps)
+    # Format with timestamps per segment
     lines = []
-    current_line_words = []
-    current_start = None
-
-    for word in words:
-        word_start = word.get("start", 0)
-        word_text = word.get("text", "")
-
-        if current_start is None:
-            current_start = word_start
-
-        current_line_words.append(word_text)
-
-        # Break line on sentence-ending punctuation
-        if word_text.rstrip().endswith((".", "。", "!", "?", "！", "？")):
-            ts = f"[{int(current_start//60):02d}:{int(current_start%60):02d}]"
-            line_text = "".join(current_line_words)
-            line_text = _convert_chinese(line_text, language)
-            lines.append(f"{ts} {line_text}")
-            current_line_words = []
-            current_start = None
-
-    # Handle remaining words
-    if current_line_words:
-        ts = f"[{int((current_start or 0)//60):02d}:{int((current_start or 0)%60):02d}]"
-        line_text = "".join(current_line_words)
-        line_text = _convert_chinese(line_text, language)
-        lines.append(f"{ts} {line_text}")
+    for seg in segments:
+        start = seg.start if hasattr(seg, "start") else seg.get("start", 0)
+        text = seg.text if hasattr(seg, "text") else seg.get("text", "")
+        text = _convert_chinese(text.strip(), language)
+        ts = f"[{int(start // 60):02d}:{int(start % 60):02d}]"
+        lines.append(f"{ts} {text}")
 
     return "\n".join(lines)
 
@@ -532,7 +488,7 @@ async def transcribe_minutes(
     language: str = Form("yue"),
     include_timestamps: bool = Form(False),
 ):
-    """Transcribe uploaded audio file using ElevenLabs Scribe API."""
+    """Transcribe uploaded audio file using Groq Whisper API."""
     # Validate file
     if not file.filename:
         return JSONResponse(status_code=400, content={"error": "No file provided"})
@@ -545,7 +501,7 @@ async def transcribe_minutes(
         )
 
     content = await file.read()
-    if len(content) > ELEVENLABS_MAX_FILE_SIZE:
+    if len(content) > MINUTES_MAX_FILE_SIZE:
         return JSONResponse(
             status_code=400,
             content={"error": "File too large (max 100MB)"},
@@ -555,16 +511,43 @@ async def transcribe_minutes(
     input_path = str(SRT_DIR / f"upload_{uuid.uuid4()}{ext}")
     Path(input_path).write_bytes(content)
     norm_path = None
+    chunk_paths = []
 
     try:
         # Normalize audio
         norm_path = await asyncio.to_thread(_normalize_audio, input_path)
 
-        # Transcribe with ElevenLabs
-        result = await _call_elevenlabs_scribe(norm_path, language)
+        # Split into chunks if needed (Groq 25MB limit)
+        chunks = await asyncio.to_thread(_split_audio, norm_path)
+        chunk_paths = [p for p, _ in chunks if p != norm_path]
+
+        # Transcribe each chunk with Groq Whisper
+        all_segments = []
+        for chunk_path, offset in chunks:
+            def _transcribe(path=chunk_path, lang=language):
+                with open(path, "rb") as f:
+                    return groq_client.audio.transcriptions.create(
+                        file=("audio.mp3", f),
+                        model="whisper-large-v3",
+                        language=lang,
+                        response_format="verbose_json",
+                        timestamp_granularities=["segment"],
+                    )
+
+            transcription = await asyncio.to_thread(_transcribe)
+
+            segs = transcription.segments if hasattr(transcription, "segments") else transcription.get("segments", [])
+            for seg in segs:
+                if isinstance(seg, dict):
+                    seg["start"] = seg.get("start", 0) + offset
+                    seg["end"] = seg.get("end", 0) + offset
+                else:
+                    seg.start += offset
+                    seg.end += offset
+                all_segments.append(seg)
 
         # Format output
-        text = _format_minutes_text(result, language, include_timestamps)
+        text = _format_minutes_text(all_segments, language, include_timestamps)
 
         # Save for download
         txt_filename = f"{uuid.uuid4()}.txt"
@@ -576,17 +559,14 @@ async def transcribe_minutes(
             "filename": txt_filename,
         }
 
-    except httpx.HTTPStatusError as exc:
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"ElevenLabs API error: {exc.response.status_code} - {exc.response.text[:200]}"},
-        )
     except Exception as exc:
         return JSONResponse(status_code=500, content={"error": str(exc)})
     finally:
         Path(input_path).unlink(missing_ok=True)
         if norm_path:
             Path(norm_path).unlink(missing_ok=True)
+        for cp in chunk_paths:
+            Path(cp).unlink(missing_ok=True)
 
 
 @app.get("/health")
