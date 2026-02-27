@@ -1,6 +1,7 @@
 import { useState } from "react";
 import VideoTranscriber from "./components/VideoTranscriber";
 import LiveSTT from "./components/LiveSTT";
+import MinutesAgent from "./components/MinutesAgent";
 
 const API_URL = import.meta.env.VITE_API_URL || "";
 
@@ -21,12 +22,12 @@ export default function App() {
         </div>
       </header>
 
-      {/* Tab bar - only show on mobile */}
-      <div className="bg-white border-b border-gray-200 lg:hidden">
+      {/* Tab bar */}
+      <div className="bg-white border-b border-gray-200">
         <div className="max-w-6xl mx-auto flex">
           <button
             onClick={() => setTab("youtube")}
-            className={`flex-1 px-6 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+            className={`flex-1 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
               tab === "youtube"
                 ? "border-red-500 text-red-600"
                 : "border-transparent text-gray-500 hover:text-gray-700"
@@ -36,32 +37,32 @@ export default function App() {
           </button>
           <button
             onClick={() => setTab("live")}
-            className={`flex-1 px-6 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+            className={`flex-1 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
               tab === "live"
                 ? "border-blue-500 text-blue-600"
                 : "border-transparent text-gray-500 hover:text-gray-700"
             }`}
           >
-            Live Speech-to-Text
+            Live STT
+          </button>
+          <button
+            onClick={() => setTab("minutes")}
+            className={`flex-1 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+              tab === "minutes"
+                ? "border-green-500 text-green-600"
+                : "border-transparent text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            Minutes Agent
           </button>
         </div>
       </div>
 
       {/* Content */}
-      <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6">
-        {/* Desktop: side by side */}
-        <div className="hidden lg:grid lg:grid-cols-2 lg:gap-6">
-          <VideoTranscriber apiUrl={API_URL} />
-          <LiveSTT apiUrl={API_URL} />
-        </div>
-        {/* Mobile: tabbed */}
-        <div className="lg:hidden">
-          {tab === "youtube" ? (
-            <VideoTranscriber apiUrl={API_URL} />
-          ) : (
-            <LiveSTT apiUrl={API_URL} />
-          )}
-        </div>
+      <main className="flex-1 max-w-2xl w-full mx-auto p-4 sm:p-6">
+        {tab === "youtube" && <VideoTranscriber apiUrl={API_URL} />}
+        {tab === "live" && <LiveSTT apiUrl={API_URL} />}
+        {tab === "minutes" && <MinutesAgent apiUrl={API_URL} />}
       </main>
 
       <footer className="text-center text-xs text-gray-400 py-3 border-t border-gray-100">

@@ -10,7 +10,7 @@ import yt_dlp
 import opencc
 import httpx
 from groq import Groq
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, File, UploadFile, Form
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -29,6 +29,11 @@ _s2t = opencc.OpenCC("s2t")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 OLLAMA_ENDPOINT = "https://ollama.com/api/chat"
 OLLAMA_MODEL = "deepseek-v3.2"
+
+# ElevenLabs Scribe API
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+ELEVENLABS_API_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+ELEVENLABS_MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 
 _SUMMARY_PROMPT = """You are an AI assistant that summarizes video transcripts. You will receive SRT subtitle text from a YouTube video.
 
@@ -212,6 +217,23 @@ def _convert_to_wav(input_bytes: bytes) -> str:
     return str(out_path)
 
 
+def _normalize_audio(input_path: str) -> str:
+    """Normalize audio to 16kHz mono for optimal transcription."""
+    out_path = str(SRT_DIR / f"norm_{uuid.uuid4()}.mp3")
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", input_path,
+            "-ar", "16000", "-ac", "1",
+            "-af", "highpass=f=200,lowpass=f=3000",
+            out_path
+        ],
+        capture_output=True,
+    )
+    if proc.returncode != 0 or not Path(out_path).exists():
+        raise RuntimeError("Audio normalization failed")
+    return out_path
+
+
 def _format_ts(seconds: float) -> str:
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
@@ -313,17 +335,26 @@ async def transcribe_youtube(req: TranscribeRequest):
 
 
 @app.get("/api/download/{filename}")
-async def download_srt(filename: str):
+async def download_file(filename: str):
     # Prevent path traversal
     if "/" in filename or "\\" in filename or ".." in filename:
         return JSONResponse(status_code=400, content={"error": "Invalid filename"})
     filepath = SRT_DIR / filename
     if not filepath.exists():
         return JSONResponse(status_code=404, content={"error": "File not found"})
+
+    # Determine media type based on extension
+    if filename.endswith(".srt"):
+        media_type = "application/x-subrip"
+    elif filename.endswith(".txt"):
+        media_type = "text/plain; charset=utf-8"
+    else:
+        media_type = "application/octet-stream"
+
     return FileResponse(
         filepath,
         filename=filename,
-        media_type="application/x-subrip",
+        media_type=media_type,
     )
 
 
@@ -398,6 +429,73 @@ async def _call_ollama(text: str, mode: str) -> str:
         return data["message"]["content"]
 
 
+async def _call_elevenlabs_scribe(audio_path: str, language: str) -> dict:
+    """Call ElevenLabs Scribe API for transcription."""
+    if not ELEVENLABS_API_KEY:
+        raise RuntimeError("ELEVENLABS_API_KEY not configured")
+
+    with open(audio_path, "rb") as f:
+        files = {"file": (Path(audio_path).name, f.read())}
+
+    data = {"model_id": "scribe_v1", "language_code": language}
+
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        resp = await client.post(
+            ELEVENLABS_API_URL,
+            headers={"xi-api-key": ELEVENLABS_API_KEY},
+            files=files,
+            data=data,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+def _format_minutes_text(result: dict, language: str, include_timestamps: bool) -> str:
+    """Format ElevenLabs response as plain text or timestamped text."""
+    text = result.get("text", "")
+    text = _convert_chinese(text, language)
+
+    if not include_timestamps:
+        return text
+
+    # Format with timestamps from words if available
+    words = result.get("words", [])
+    if not words:
+        return text
+
+    # Group words into lines (roughly by sentence or time gaps)
+    lines = []
+    current_line_words = []
+    current_start = None
+
+    for word in words:
+        word_start = word.get("start", 0)
+        word_text = word.get("text", "")
+
+        if current_start is None:
+            current_start = word_start
+
+        current_line_words.append(word_text)
+
+        # Break line on sentence-ending punctuation
+        if word_text.rstrip().endswith((".", "。", "!", "?", "！", "？")):
+            ts = f"[{int(current_start//60):02d}:{int(current_start%60):02d}]"
+            line_text = "".join(current_line_words)
+            line_text = _convert_chinese(line_text, language)
+            lines.append(f"{ts} {line_text}")
+            current_line_words = []
+            current_start = None
+
+    # Handle remaining words
+    if current_line_words:
+        ts = f"[{int((current_start or 0)//60):02d}:{int((current_start or 0)%60):02d}]"
+        line_text = "".join(current_line_words)
+        line_text = _convert_chinese(line_text, language)
+        lines.append(f"{ts} {line_text}")
+
+    return "\n".join(lines)
+
+
 @app.post("/api/summarize")
 async def summarize_text(req: SummarizeRequest):
     if req.mode not in ("summary", "polish"):
@@ -426,6 +524,69 @@ async def summarize_text(req: SummarizeRequest):
         )
     except Exception as exc:
         return JSONResponse(status_code=500, content={"error": str(exc)})
+
+
+@app.post("/api/minutes")
+async def transcribe_minutes(
+    file: UploadFile = File(...),
+    language: str = Form("yue"),
+    include_timestamps: bool = Form(False),
+):
+    """Transcribe uploaded audio file using ElevenLabs Scribe API."""
+    # Validate file
+    if not file.filename:
+        return JSONResponse(status_code=400, content={"error": "No file provided"})
+
+    ext = Path(file.filename).suffix.lower()
+    if ext not in {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".mp4", ".mov"}:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Unsupported format: {ext}. Use mp3, wav, m4a, ogg, flac, webm, mp4, or mov."},
+        )
+
+    content = await file.read()
+    if len(content) > ELEVENLABS_MAX_FILE_SIZE:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "File too large (max 100MB)"},
+        )
+
+    # Save uploaded file
+    input_path = str(SRT_DIR / f"upload_{uuid.uuid4()}{ext}")
+    Path(input_path).write_bytes(content)
+    norm_path = None
+
+    try:
+        # Normalize audio
+        norm_path = await asyncio.to_thread(_normalize_audio, input_path)
+
+        # Transcribe with ElevenLabs
+        result = await _call_elevenlabs_scribe(norm_path, language)
+
+        # Format output
+        text = _format_minutes_text(result, language, include_timestamps)
+
+        # Save for download
+        txt_filename = f"{uuid.uuid4()}.txt"
+        (SRT_DIR / txt_filename).write_text(text, encoding="utf-8")
+
+        return {
+            "text": text,
+            "preview": text[:1000],
+            "filename": txt_filename,
+        }
+
+    except httpx.HTTPStatusError as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"ElevenLabs API error: {exc.response.status_code} - {exc.response.text[:200]}"},
+        )
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+    finally:
+        Path(input_path).unlink(missing_ok=True)
+        if norm_path:
+            Path(norm_path).unlink(missing_ok=True)
 
 
 @app.get("/health")
